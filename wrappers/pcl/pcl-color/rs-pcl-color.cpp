@@ -34,16 +34,10 @@
 #include <pcl/console/parse.h>
 #include <boost/thread/thread.hpp>
 #include <pcl/io/io.h>
-#include <pcl/visualization/cloud_viewer.h>
-#include <pcl/visualization/pcl_visualizer.h>
-#include <pcl/filters/extract_indices.h>
-#include <pcl/sample_consensus/ransac.h>
-#include <pcl/sample_consensus/sac_model_plane.h>
-#include <pcl/sample_consensus/sac_model_sphere.h>
 using namespace std;
 
 
-1typedef pcl::PointXYZRGB RGB_Cloud;
+typedef pcl::PointXYZRGB RGB_Cloud;
 typedef pcl::PointCloud<RGB_Cloud> point_cloud;
 typedef point_cloud::Ptr cloud_pointer;
 typedef point_cloud::Ptr prevCloud;
@@ -182,14 +176,14 @@ int main() {
     if (depth_sensor.supports(RS2_OPTION_EMITTER_ENABLED))
     {
         depth_sensor.set_option(RS2_OPTION_EMITTER_ENABLED, 1.f); // Enable emitter
-        depth_sensor.set_option(RS2_OPTION_EMITTER_ENABLED, 0.f); // Disable emitter
+        //depth_sensor.set_option(RS2_OPTION_EMITTER_ENABLED, 0.f); // Disable emitter
     }
     if (depth_sensor.supports(RS2_OPTION_LASER_POWER))
     {
         // Query min and max values:
         auto range = depth_sensor.get_option_range(RS2_OPTION_LASER_POWER);
         depth_sensor.set_option(RS2_OPTION_LASER_POWER, range.max); // Set max power
-        depth_sensor.set_option(RS2_OPTION_LASER_POWER, 0.f); // Disable laser
+        //depth_sensor.set_option(RS2_OPTION_LASER_POWER, 0.f); // Disable laser
     }
 
     // Begin Stream with default configs

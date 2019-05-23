@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.1.0)
 project(RealsensePCLExamples)
 
 find_package( PCL REQUIRED )
- 
+
 if (PCL_FOUND)
   include_directories(${PCL_INCLUDE_DIRS})
   add_definitions(${PCL_DEFINITIONS})
@@ -29,3 +29,4 @@ endif()
 
 add_subdirectory(pcl)
 add_subdirectory(pcl-color)
+add_subdirectory(pcl-ransac)
