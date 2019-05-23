@@ -1,22 +1,22 @@
 /***********************************************************
  * Author:  Daniel Tran
  *          Liam Gogley
- * 
+ *
  * Purpose: The following .cpp file will utilize the Intel
  *          realsense camera to stream and capture frame
  *          data of the environment. Color is then applied
  *          and a point cloud is generated and saved to
  *          a point cloud data format (.pcd).
- * 
+ *
  * Version 0.09 - Last Editted 11/07/18
- * 
+ *
  * Rev:     Implementation of RGB Texture function to map
  *          color to point cloud data.
- * 
+ *
  ***********************************************************/
 
 #include <iostream>
-#include <algorithm> 
+#include <algorithm>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/thread/thread.hpp>
 #include <string>
@@ -35,10 +35,15 @@
 #include <boost/thread/thread.hpp>
 #include <pcl/io/io.h>
 #include <pcl/visualization/cloud_viewer.h>
-
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/sample_consensus/ransac.h>
+#include <pcl/sample_consensus/sac_model_plane.h>
+#include <pcl/sample_consensus/sac_model_sphere.h>
 using namespace std;
 
-typedef pcl::PointXYZRGB RGB_Cloud;
+
+1typedef pcl::PointXYZRGB RGB_Cloud;
 typedef pcl::PointCloud<RGB_Cloud> point_cloud;
 typedef point_cloud::Ptr cloud_pointer;
 typedef point_cloud::Ptr prevCloud;
@@ -56,7 +61,7 @@ int i = 1; // Index for incremental file name
 //======================================================
 // RGB Texture
 // - Function is utilized to extract the RGB data from
-// a single point return R, G, and B values. 
+// a single point return R, G, and B values.
 // Normals are stored as RGB components and
 // correspond to the specific depth (XYZ) coordinate.
 // By taking these normals and converting them to
@@ -68,7 +73,7 @@ std::tuple<int, int, int> RGB_Texture(rs2::video_frame texture, rs2::texture_coo
     // Get Width and Height coordinates of texture
     int width  = texture.get_width();  // Frame width in pixels
     int height = texture.get_height(); // Frame height in pixels
-    
+
     // Normals to Texture Coordinates conversion
     int x_value = min(max(int(Texture_XY.u * width  + .5f), 0), width - 1);
     int y_value = min(max(int(Texture_XY.v * height + .5f), 0), height - 1);
@@ -78,7 +83,7 @@ std::tuple<int, int, int> RGB_Texture(rs2::video_frame texture, rs2::texture_coo
     int Text_Index =  (bytes + strides);
 
     const auto New_Texture = reinterpret_cast<const uint8_t*>(texture.get_data());
-    
+
     // RGB components to save in tuple
     int NT1 = New_Texture[Text_Index];
     int NT2 = New_Texture[Text_Index + 1];
@@ -92,7 +97,7 @@ std::tuple<int, int, int> RGB_Texture(rs2::video_frame texture, rs2::texture_coo
 // - Function is utilized to fill a point cloud
 //  object with depth and RGB data from a single
 //  frame captured using the Realsense.
-//=================================================== 
+//===================================================
 cloud_pointer PCL_Conversion(const rs2::points& points, const rs2::video_frame& color){
 
     // Object Declaration (Point Cloud)
@@ -106,8 +111,8 @@ cloud_pointer PCL_Conversion(const rs2::points& points, const rs2::video_frame& 
     //================================
     // Convert data captured from Realsense camera to Point Cloud
     auto sp = points.get_profile().as<rs2::video_stream_profile>();
-    
-    cloud->width  = static_cast<uint32_t>( sp.width()  );   
+
+    cloud->width  = static_cast<uint32_t>( sp.width()  );
     cloud->height = static_cast<uint32_t>( sp.height() );
     cloud->is_dense = false;
     cloud->points.resize( points.size() );
@@ -118,7 +123,7 @@ cloud_pointer PCL_Conversion(const rs2::points& points, const rs2::video_frame& 
     // Iterating through all points and setting XYZ coordinates
     // and RGB values
     for (int i = 0; i < points.size(); i++)
-    {   
+    {
         //===================================
         // Mapping Depth Coordinates
         // - Depth data stored as XYZ values
@@ -136,7 +141,7 @@ cloud_pointer PCL_Conversion(const rs2::points& points, const rs2::video_frame& 
         cloud->points[i].b = get<0>(RGB_Color); // Reference tuple<0>
 
     }
-    
+
    return cloud; // PCL RGB Point Cloud generated
 }
 
@@ -146,7 +151,7 @@ int main() {
     // Variable Declaration
     //======================
     bool captureLoop = true; // Loop control for generating point clouds
-   
+
     //====================
     // Object Declaration
     //====================
@@ -155,7 +160,7 @@ int main() {
 
     // Declare pointcloud object, for calculating pointclouds and texture mappings
     rs2::pointcloud pc;
-    
+
     // Declare RealSense pipeline, encapsulating the actual device and sensors
     rs2::pipeline pipe;
 
@@ -168,8 +173,8 @@ int main() {
     cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_BGR8, 30);
     cfg.enable_stream(RS2_STREAM_INFRARED, 1280, 720, RS2_FORMAT_Y8, 30);
     cfg.enable_stream(RS2_STREAM_DEPTH, 1280, 720, RS2_FORMAT_Z16, 30);
-    
-    rs2::pipeline_profile selection = pipe.start(cfg); 
+
+    rs2::pipeline_profile selection = pipe.start(cfg);
 
     rs2::device selected_device = selection.get_device();
     auto depth_sensor = selected_device.first<rs2::depth_sensor>();
@@ -186,23 +191,23 @@ int main() {
         depth_sensor.set_option(RS2_OPTION_LASER_POWER, range.max); // Set max power
         depth_sensor.set_option(RS2_OPTION_LASER_POWER, 0.f); // Disable laser
     }
-    
+
     // Begin Stream with default configs
 
     // Loop and take frame captures upon user input
     while(captureLoop == true) {
 
         // Set loop flag based on user input
-        captureLoop = userInput(); 
+        captureLoop = userInput();
         if (captureLoop == false) { break; }
-        
+
 
          // Wait for frames from the camera to settle
         for (int i = 0; i < 30; i++) {
             auto frames = pipe.wait_for_frames(); //Drop several frames for auto-exposure
         }
 
-        // Capture a single frame and obtain depth + RGB values from it    
+        // Capture a single frame and obtain depth + RGB values from it
         auto frames = pipe.wait_for_frames();
         auto depth = frames.get_depth_frame();
         auto RGB = frames.get_color_frame();
@@ -215,7 +220,7 @@ int main() {
 
         // Convert generated Point Cloud to PCL Formatting
         cloud_pointer cloud = PCL_Conversion(points, RGB);
-        
+
         //========================================
         // Filter PointCloud (PassThrough Method)
         //========================================
@@ -224,24 +229,24 @@ int main() {
         Cloud_Filter.setFilterFieldName ("z");        // Set field name to Z-coordinate
         Cloud_Filter.setFilterLimits (0.0, 1.0);      // Set accepted interval values
         Cloud_Filter.filter (*newCloud);              // Filtered Cloud Outputted
-        
+
         cloudFile = "Captured_Frame" + to_string(i) + ".pcd";
-        
+
         //==============================
         // Write PC to .pcd File Format
         //==============================
         // Take Cloud Data and write to .PCD File Format
         cout << "Generating PCD Point Cloud File... " << endl;
         pcl::io::savePCDFileASCII(cloudFile, *cloud); // Input cloud to be saved to .pcd
-        cout << cloudFile << " successfully generated. " << endl; 
-        
+        cout << cloudFile << " successfully generated. " << endl;
+
         //Load generated PCD file for viewing
         Load_PCDFile();
         i++; // Increment File Name
     }//End-while
-   
-   
-    cout << "Exiting Program... " << endl; 
+
+
+    cout << "Exiting Program... " << endl;
     return EXIT_SUCCESS;
 }
 
@@ -251,10 +256,10 @@ void Load_PCDFile(void)
 
     // Generate object to store cloud in .pcd file
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloudView (new pcl::PointCloud<pcl::PointXYZRGB>);
-    
+
     openFileName = "Captured_Frame" + to_string(i) + ".pcd";
     pcl::io::loadPCDFile (openFileName, *cloudView); // Load .pcd File
-    
+
     //==========================
     // Pointcloud Visualization
     //==========================
@@ -262,7 +267,7 @@ void Load_PCDFile(void)
     boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer (new pcl::visualization::PCLVisualizer ("Captured Frame"));
 
     // Set background of viewer to black
-    viewer->setBackgroundColor (0, 0, 0); 
+    viewer->setBackgroundColor (0, 0, 0);
     // Add generated point cloud and identify with string "Cloud"
     viewer->addPointCloud<pcl::PointXYZRGB> (cloudView, "Cloud");
     // Default size for rendered points
@@ -272,16 +277,16 @@ void Load_PCDFile(void)
 
     cout << endl;
     cout << "Press [Q] in viewer to continue. " << endl;
-    
+
     viewer->spin(); // Allow user to rotate point cloud and view it
 
     // Note: No method to close PC visualizer, pressing Q to continue software flow only solution.
-   
-    
+
+
 }
 //========================================
 // userInput
-// - Prompts user for a char to 
+// - Prompts user for a char to
 // test for decision making.
 // [y|Y] - Capture frame and save as .pcd
 // [n|N] - Exit program
@@ -295,7 +300,7 @@ bool userInput(void){
 
         // Prompt User to execute frame capture algorithm
         cout << endl;
-        cout << "Generate a Point Cloud? [y/n] "; 
+        cout << "Generate a Point Cloud? [y/n] ";
         cin >> takeFrame;
         cout << endl;
         // Condition [Y] - Capture frame, store in PCL object and display
@@ -318,5 +323,5 @@ bool userInput(void){
         }
     } while(inputCheck == false);
 
-    return setLoopFlag; 
+    return setLoopFlag;
 }
