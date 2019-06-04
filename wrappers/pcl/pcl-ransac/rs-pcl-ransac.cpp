@@ -4,6 +4,7 @@
 
 
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
+#include <Eigen/Geometry>
 #include <pcl/console/parse.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/passthrough.h>
@@ -13,10 +14,12 @@
 #include <pcl/sample_consensus/ransac.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
 #include <pcl/sample_consensus/sac_model_sphere.h>
+#include <pcl/sample_consensus/sac_model_perpendicular_plane.h>
 #include <pcl/visualization/pcl_visualizer.h>
 
 using namespace std;
 using namespace pcl::console;
+using namespace rs2;
 
 typedef pcl::PointXYZRGB RGB_Cloud;
 typedef pcl::PointCloud<RGB_Cloud> point_cloud;
@@ -137,6 +140,9 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_BGR8, 30);
   cfg.enable_stream(RS2_STREAM_INFRARED, 1280, 720, RS2_FORMAT_Y8, 30);
   cfg.enable_stream(RS2_STREAM_DEPTH, 1280, 720, RS2_FORMAT_Z16, 30);
+    // cfg.enable_stream(RS2_STREAM_ACCEL);
+    cfg.enable_stream(RS2_STREAM_GYRO);
+  // cfg.enable_stream(RS2_STREAM_POSE, RS2_FORMAT_6DOF);
   rs2::pipeline_profile selection = pipe.start(cfg);
 
   rs2::device selected_device = selection.get_device();
@@ -155,24 +161,46 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
       //depth_sensor.set_option(RS2_OPTION_LASER_POWER, 0.f); // Disable laser
   }
 
-  cfg.enable_stream(RS2_STREAM_POSE, RS2_FORMAT_6DOF);
   std::cout << "Enabled Stream" << '\n';
   // Capture a single frame and obtain depth + RGB values from it
   // Wait for frames from the camera to settle
- for (int i = 0; i < 30; i++) {
+ for (int i = 0; i < 10; i++) {
      auto frames = pipe.wait_for_frames(); //Drop several frames for auto-exposure
  }
+
+
  std::cout << "waited for 30 frames" << '\n';
-  auto frames = pipe.wait_for_frames();
+ auto frames = pipe.wait_for_frames();
   auto depth = frames.get_depth_frame();
   auto RGB = frames.get_color_frame();
   std::cout << "rgb Frame collected." << '\n';
 
-  auto f = frames.first_or_default(RS2_STREAM_POSE);
-  // Cast the frame to pose_frame and get its data
-  auto pose_data = f.as<rs2::pose_frame>().get_pose_data();
-  // Map Color texture to each point
-  std::cout << "got poseframe" << '\n';
+
+rs2_vector gyro_data;
+try{
+  // auto frames = pipe.wait_for_frames();
+  for (auto f : frames) {
+     if (f.is<motion_frame>()) {
+         motion_frame mf = f.as<motion_frame>();
+         if (mf && mf.get_profile().stream_type() == RS2_STREAM_GYRO &&
+    	mf.get_profile().format() == RS2_FORMAT_MOTION_XYZ32F)
+    {
+        // Get gyro measurements
+        gyro_data = mf.get_motion_data();
+    }
+         printf("%d:gyro_data: %f,%f,%f\n", f.get_profile().stream_type(),gyro_data.x ,gyro_data.y ,gyro_data.z);
+         std::cout << "got motionframe" << '\n';
+     }else{
+       std::cout<<"not a poseframe"<<'\n';
+     }
+  }
+}catch (const rs2::error & e)
+  {
+      std::cerr << "RealSense error calling " << e.get_failed_function() << "(" << e.get_failed_args() << "):\n    " << e.what() << std::endl;
+
+  }
+
+
 
   pc.map_to(RGB);
   // Generate Point Cloud
@@ -180,6 +208,8 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   // Convert generated Point Cloud to PCL Formatting
   cloud_pointer cloud = PCL_Conversion(points, RGB);
 
+  printf("PCL Pose: %f,%f,%f,%f\n",cloud->sensor_orientation_.x() ,cloud->sensor_orientation_.y() ,cloud->sensor_orientation_.z(),cloud->sensor_orientation_.w());
+  cloud->sensor_orientation_=Eigen::Quaternionf()
   //========================================
   // Filter PointCloud (PassThrough Method)
   //========================================
@@ -198,13 +228,18 @@ int main(int argc, char** argv)
   //cloud is input.
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr final (new pcl::PointCloud<pcl::PointXYZRGB>);
+  pcl::RandomSampleConsensus<pcl::PointXYZRGB>* ransac;
 
   if(pcl::console::find_argument (argc, argv, "-f") >= 0)
   {
-    auto openFileName = string(argv[find_argument(argc, argv, "-f")+1]);
-    cout<<openFileName;
+    auto openFileName = argv[find_argument(argc, argv, "-f")+1];
+    printf("filename: %s\n", openFileName );
     //auto openFileName = "Captured_Frame" + to_string(1) + ".pcd";
-    pcl::io::loadPCDFile (openFileName, *cloud); // Load .pcd File
+    if (pcl::io::loadPCDFile<pcl::PointXYZRGB> (openFileName, *cloud) == -1) //* load the file
+  {
+    PCL_ERROR ("Couldn't read file %s\n",openFileName);
+    return (-1);
+  }
   }else{
     printf("GetCloud\n" );
     getCloud(cloud);
@@ -216,34 +251,66 @@ int main(int argc, char** argv)
     model_s(new pcl::SampleConsensusModelSphere<pcl::PointXYZRGB> (cloud));
   pcl::SampleConsensusModelPlane<pcl::PointXYZRGB>::Ptr
     model_p (new pcl::SampleConsensusModelPlane<pcl::PointXYZRGB> (cloud));
-  if(pcl::console::find_argument (argc, argv, "-f") >= 0)
+  pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB>::Ptr
+    model_pp (new pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB> (cloud));
+  if(pcl::console::find_argument (argc, argv, "-m") >= 0)
   {
-    pcl::RandomSampleConsensus<pcl::PointXYZRGB> ransac (model_p);
-    ransac.setDistanceThreshold (.01);
-    ransac.computeModel();
-    ransac.getInliers(inliers);
-  }
-  else if (pcl::console::find_argument (argc, argv, "-sf") >= 0 )
-  {
-    pcl::RandomSampleConsensus<pcl::PointXYZRGB> ransac (model_s);
-    ransac.setDistanceThreshold (.01);
-    ransac.computeModel();
-    ransac.getInliers(inliers);
+    switch (std::stoi(argv[pcl::console::find_argument (argc, argv, "-m")+1])) {
+      case 1:
+      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+      printf("RANSAC Model P\n" );
+      break;
+      case 2:
+      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_s);
+      printf("RANSAC Model S\n" );
+      break;
+      case 3:
+      model_pp->setAxis(Eigen::Vector3f (0.0, 0.0, 1.0));
+      model_pp->setEpsAngle (pcl::deg2rad (15.0));
+      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
+      printf("RANSAC Model Perpendicular Plane\n" );
+      break;
+      default:
+      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+      printf("RANSAC Model P\n" );
+    }
+    if(pcl::console::find_argument (argc, argv, "-t") >= 0)
+    {
+      ransac->setDistanceThreshold (int(pcl::console::find_argument (argc, argv, "-t")+1));
+    }else{
+      ransac->setDistanceThreshold (0.01);
+    }
+    ransac->computeModel();
+    ransac->getInliers(inliers);
+
+
+  }else{
+
   }
 
-  // copies all inliers of the model computed to another PointCloud
-  pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
-
+  //     pcl::SampleConsensusModelSphere<pcl::PointXYZRGB>::Ptr
+  //     model_p (new pcl::SampleConsensusModelSphere<pcl::PointXYZRGB> (cloud));
+  //     pcl::RandomSampleConsensus<pcl::PointXYZRGB> ransac (model_p);
+  //     ransac.setDistanceThreshold (.01);
+  // ransac.computeModel();
+  // ransac.getInliers(inliers);
+      // copies all inliers of the model computed to another PointCloud
+      pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
   // creates the visualization object and adds either our original cloud or all of the inliers
   // depending on the command line arguments specified.
-  pcl::visualization::PCLVisualizer::Ptr viewer;
-  if (pcl::console::find_argument (argc, argv, "-f") >= 0 || pcl::console::find_argument (argc, argv, "-sf") >= 0)
-    viewer = simpleVis(final);
-  else
-    viewer = simpleVis(cloud);
-  while (!viewer->wasStopped ())
+  pcl::visualization::PCLVisualizer::Ptr viewer1;
+  pcl::visualization::PCLVisualizer::Ptr viewer2;
+  if (pcl::console::find_argument (argc, argv, "-m") >= 0){
+    printf("Displaying processed cloud \n" );
+    viewer1 = simpleVis(final);
+    viewer2 = simpleVis(cloud);
+  }else{
+    printf("Displaying raw cloud\n");
+    viewer1 = simpleVis(cloud);
+  }
+  while (!viewer1->wasStopped () && !viewer2->wasStopped ())
   {
-    viewer->spinOnce (100);
+    viewer1->spinOnce (100);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
   return 0;
