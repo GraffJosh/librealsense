@@ -17,6 +17,8 @@
 #include <pcl/sample_consensus/sac_model_perpendicular_plane.h>
 #include <pcl/visualization/pcl_visualizer.h>
 
+#define PI 3.1415
+
 using namespace std;
 using namespace pcl::console;
 using namespace rs2;
@@ -140,8 +142,8 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_BGR8, 30);
   cfg.enable_stream(RS2_STREAM_INFRARED, 1280, 720, RS2_FORMAT_Y8, 30);
   cfg.enable_stream(RS2_STREAM_DEPTH, 1280, 720, RS2_FORMAT_Z16, 30);
-    // cfg.enable_stream(RS2_STREAM_ACCEL);
-    cfg.enable_stream(RS2_STREAM_GYRO);
+    cfg.enable_stream(RS2_STREAM_ACCEL);
+    // cfg.enable_stream(RS2_STREAM_GYRO);
   // cfg.enable_stream(RS2_STREAM_POSE, RS2_FORMAT_6DOF);
   rs2::pipeline_profile selection = pipe.start(cfg);
 
@@ -176,20 +178,22 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   std::cout << "rgb Frame collected." << '\n';
 
 
-rs2_vector gyro_data;
+rs2_vector accel_data;
+rs2_vector accel_angle;
 try{
   // auto frames = pipe.wait_for_frames();
   for (auto f : frames) {
      if (f.is<motion_frame>()) {
          motion_frame mf = f.as<motion_frame>();
-         if (mf && mf.get_profile().stream_type() == RS2_STREAM_GYRO &&
-    	mf.get_profile().format() == RS2_FORMAT_MOTION_XYZ32F)
+         if (mf && mf.get_profile().stream_type() == RS2_STREAM_ACCEL )
     {
         // Get gyro measurements
-        gyro_data = mf.get_motion_data();
+        accel_data = mf.get_motion_data();
+        accel_angle.z = atan2(accel_data.y, accel_data.z)*(180/PI);
+        accel_angle.x = atan2(accel_data.x, sqrt(accel_data.y * accel_data.y + accel_data.z * accel_data.z))*(180/PI);
+        printf("%d:accel_data: %f,%f\n", f.get_profile().stream_type(),accel_angle.z ,accel_angle.x);
+        std::cout << "got motionframe" << '\n';
     }
-         printf("%d:gyro_data: %f,%f,%f\n", f.get_profile().stream_type(),gyro_data.x ,gyro_data.y ,gyro_data.z);
-         std::cout << "got motionframe" << '\n';
      }else{
        std::cout<<"not a poseframe"<<'\n';
      }
@@ -207,9 +211,8 @@ try{
   auto points = pc.calculate(depth);
   // Convert generated Point Cloud to PCL Formatting
   cloud_pointer cloud = PCL_Conversion(points, RGB);
-
+  cloud->sensor_orientation_ = Eigen::AngleAxisf(accel_angle.z, Eigen::Vector3f::UnitX()) * Eigen::AngleAxisf(accel_angle.x, Eigen::Vector3f::UnitY()) * Eigen::AngleAxisf(0, Eigen::Vector3f::UnitZ());
   printf("PCL Pose: %f,%f,%f,%f\n",cloud->sensor_orientation_.x() ,cloud->sensor_orientation_.y() ,cloud->sensor_orientation_.z(),cloud->sensor_orientation_.w());
-  cloud->sensor_orientation_=Eigen::Quaternionf()
   //========================================
   // Filter PointCloud (PassThrough Method)
   //========================================
@@ -265,7 +268,7 @@ int main(int argc, char** argv)
       printf("RANSAC Model S\n" );
       break;
       case 3:
-      model_pp->setAxis(Eigen::Vector3f (0.0, 0.0, 1.0));
+      model_pp->setAxis(cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2));
       model_pp->setEpsAngle (pcl::deg2rad (15.0));
       ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
       printf("RANSAC Model Perpendicular Plane\n" );
