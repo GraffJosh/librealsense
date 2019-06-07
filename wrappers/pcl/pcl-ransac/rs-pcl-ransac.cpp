@@ -26,6 +26,87 @@ using namespace rs2;
 typedef pcl::PointXYZRGB RGB_Cloud;
 typedef pcl::PointCloud<RGB_Cloud> point_cloud;
 typedef point_cloud::Ptr cloud_pointer;
+
+
+class rotation_estimator
+{
+    // theta is the angle of camera rotation in x, y and z components
+    float3 theta;
+    std::mutex theta_mtx;
+    /* alpha indicates the part that gyro and accelerometer take in computation of theta; higher alpha gives more weight to gyro, but too high
+    values cause drift; lower alpha gives more weight to accelerometer, which is more sensitive to disturbances */
+    float alpha = 0.98;
+    bool first = true;
+    // Keeps the arrival time of previous gyro frame
+    double last_ts_gyro = 0;
+public:
+    // Function to calculate the change in angle of motion based on data from gyro
+    void process_gyro(rs2_vector gyro_data, double ts)
+    {
+        if (first) // On the first iteration, use only data from accelerometer to set the camera's initial position
+        {
+            last_ts_gyro = ts;
+            return;
+        }
+        // Holds the change in angle, as calculated from gyro
+        float3 gyro_angle;
+
+        // Initialize gyro_angle with data from gyro
+        gyro_angle.x = gyro_data.x; // Pitch
+        gyro_angle.y = gyro_data.y; // Yaw
+        gyro_angle.z = gyro_data.z; // Roll
+
+        // Compute the difference between arrival times of previous and current gyro frames
+        double dt_gyro = (ts - last_ts_gyro) / 1000.0;
+        last_ts_gyro = ts;
+
+        // Change in angle equals gyro measures * time passed since last measurement
+        gyro_angle = gyro_angle * dt_gyro;
+
+        // Apply the calculated change of angle to the current angle (theta)
+        std::lock_guard<std::mutex> lock(theta_mtx);
+        theta.add(-gyro_angle.z, -gyro_angle.y, gyro_angle.x);
+    }
+
+    void process_accel(rs2_vector accel_data)
+    {
+        // Holds the angle as calculated from accelerometer data
+        float3 accel_angle;
+
+        // Calculate rotation angle from accelerometer data
+        accel_angle.z = atan2(accel_data.y, accel_data.z);
+        accel_angle.x = atan2(accel_data.x, sqrt(accel_data.y * accel_data.y + accel_data.z * accel_data.z));
+
+        // If it is the first iteration, set initial pose of camera according to accelerometer data (note the different handling for Y axis)
+        std::lock_guard<std::mutex> lock(theta_mtx);
+        if (first)
+        {
+            first = false;
+            theta = accel_angle;
+            // Since we can't infer the angle around Y axis using accelerometer data, we'll use PI as a convetion for the initial pose
+            theta.y = PI;
+        }
+        else
+        {
+            /*
+            Apply Complementary Filter:
+                - high-pass filter = theta * alpha:  allows short-duration signals to pass through while filtering out signals
+                  that are steady over time, is used to cancel out drift.
+                - low-pass filter = accel * (1- alpha): lets through long term changes, filtering out short term fluctuations
+            */
+            theta.x = theta.x * alpha + accel_angle.x * (1 - alpha);
+            theta.z = theta.z * alpha + accel_angle.z * (1 - alpha);
+        }
+    }
+
+    // Returns the current rotation angle
+    float3 get_theta()
+    {
+        std::lock_guard<std::mutex> lock(theta_mtx);
+        return theta;
+    }
+};
+
 pcl::visualization::PCLVisualizer::Ptr
 simpleVis (pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr cloud)
 {
@@ -128,6 +209,24 @@ cloud_pointer PCL_Conversion(const rs2::points& points, const rs2::video_frame& 
    return cloud; // PCL RGB Point Cloud generated
 }
 
+Eigen::Quaternionf toQuaternion( double yaw, double pitch, double roll) // yaw (Z), pitch (Y), roll (X)
+{
+    // Abbreviations for the various angular functions
+    double cy = cos(yaw * 0.5);
+    double sy = sin(yaw * 0.5);
+    double cp = cos(pitch * 0.5);
+    double sp = sin(pitch * 0.5);
+    double cr = cos(roll * 0.5);
+    double sr = sin(roll * 0.5);
+
+    Eigen::Quaternionf q;
+    q.w() = cy * cp * cr + sy * sp * sr;
+    q.x() = cy * cp * sr - sy * sp * cr;
+    q.y() = sy * cp * sr + cy * sp * cr;
+    q.z() = sy * cp * cr - cy * sp * sr;
+    return q;
+}
+
 void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
 {
   // Declare pointcloud object, for calculating pointclouds and texture mappings
@@ -142,8 +241,8 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_BGR8, 30);
   cfg.enable_stream(RS2_STREAM_INFRARED, 1280, 720, RS2_FORMAT_Y8, 30);
   cfg.enable_stream(RS2_STREAM_DEPTH, 1280, 720, RS2_FORMAT_Z16, 30);
-    cfg.enable_stream(RS2_STREAM_ACCEL);
-    // cfg.enable_stream(RS2_STREAM_GYRO);
+  cfg.enable_stream(RS2_STREAM_ACCEL);
+  cfg.enable_stream(RS2_STREAM_GYRO);
   // cfg.enable_stream(RS2_STREAM_POSE, RS2_FORMAT_6DOF);
   rs2::pipeline_profile selection = pipe.start(cfg);
 
@@ -177,9 +276,8 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   auto RGB = frames.get_color_frame();
   std::cout << "rgb Frame collected." << '\n';
 
-
-rs2_vector accel_data;
-rs2_vector accel_angle;
+  rs2_vector accel_data;
+  rs2_vector accel_angle;
 try{
   // auto frames = pipe.wait_for_frames();
   for (auto f : frames) {
@@ -189,13 +287,20 @@ try{
     {
         // Get gyro measurements
         accel_data = mf.get_motion_data();
-        accel_angle.z = atan2(accel_data.y, accel_data.z)*(180/PI);
-        accel_angle.x = atan2(accel_data.x, sqrt(accel_data.y * accel_data.y + accel_data.z * accel_data.z))*(180/PI);
-        printf("%d:accel_data: %f,%f\n", f.get_profile().stream_type(),accel_angle.z ,accel_angle.x);
+        // The positive x-axis points to the right.->Y
+        // The positive y-axis points down.->Z
+        // The positive z-axis points forward->X
+        accel_angle.x = 0-atan2(accel_data.y, sqrt(accel_data.z * accel_data.z + accel_data.x * accel_data.x))-(PI/2);
+        accel_angle.y = 0;
+        accel_angle.z = atan2(accel_data.z, accel_data.x)-(PI/2);
+        // accel_angle.x = 180*(PI/180);//roll
+        // accel_angle.y = 0*(PI/180);//pitch
+        // accel_angle.z = 0*(PI/180);//yaw
+printf("%d:accel_data: x:%f,y:%f,z:%f\n", f.get_profile().stream_type(),accel_angle.x*(180/PI),accel_angle.y*(180/PI) ,accel_angle.z*(180/PI));
         std::cout << "got motionframe" << '\n';
     }
      }else{
-       std::cout<<"not a poseframe"<<'\n';
+       // std::cout<<"not a poseframe"<<'\n';
      }
   }
 }catch (const rs2::error & e)
@@ -211,7 +316,8 @@ try{
   auto points = pc.calculate(depth);
   // Convert generated Point Cloud to PCL Formatting
   cloud_pointer cloud = PCL_Conversion(points, RGB);
-  cloud->sensor_orientation_ = Eigen::AngleAxisf(accel_angle.z, Eigen::Vector3f::UnitX()) * Eigen::AngleAxisf(accel_angle.x, Eigen::Vector3f::UnitY()) * Eigen::AngleAxisf(0, Eigen::Vector3f::UnitZ());
+  cloud->sensor_origin_ = {0,0,0,0};
+  cloud->sensor_orientation_ = toQuaternion(accel_angle.x,accel_angle.y,accel_angle.z);
   printf("PCL Pose: %f,%f,%f,%f\n",cloud->sensor_orientation_.x() ,cloud->sensor_orientation_.y() ,cloud->sensor_orientation_.z(),cloud->sensor_orientation_.w());
   //========================================
   // Filter PointCloud (PassThrough Method)
@@ -256,6 +362,7 @@ int main(int argc, char** argv)
     model_p (new pcl::SampleConsensusModelPlane<pcl::PointXYZRGB> (cloud));
   pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB>::Ptr
     model_pp (new pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB> (cloud));
+    Eigen::Vector3f IMU_Orientation;
   if(pcl::console::find_argument (argc, argv, "-m") >= 0)
   {
     switch (std::stoi(argv[pcl::console::find_argument (argc, argv, "-m")+1])) {
@@ -268,7 +375,8 @@ int main(int argc, char** argv)
       printf("RANSAC Model S\n" );
       break;
       case 3:
-      model_pp->setAxis(cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2));
+      // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
+      model_pp->setAxis(Eigen::Vector3f (0.0,0.0, 90.0));
       model_pp->setEpsAngle (pcl::deg2rad (15.0));
       ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
       printf("RANSAC Model Perpendicular Plane\n" );
