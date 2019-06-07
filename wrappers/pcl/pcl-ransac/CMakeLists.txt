@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.1.0)
 
 project(RealSensePCLRansac)
-
-add_executable (rs-pcl-ransac rs-pcl-ransac.cpp)
+set(CMAKE_BUILD_TYPE Debug)
+add_executable (rs-pcl-ransac rs-pcl-ransac.cpp ../RS2_example.hpp)
 set_property(TARGET rs-pcl-ransac PROPERTY CXX_STANDARD 11)
 find_package(PCL REQUIRED)
 include_directories(${PCL_INCLUDE_DIRS})

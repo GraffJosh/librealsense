@@ -1,10 +1,12 @@
 #include <iostream>
 #include <chrono>
 #include <thread>
-
+#include <future>
 
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include <Eigen/Geometry>
+#include <mutex>
+#include "../RS2_example.hpp"
 #include <pcl/console/parse.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/passthrough.h>
@@ -26,6 +28,9 @@ using namespace rs2;
 typedef pcl::PointXYZRGB RGB_Cloud;
 typedef pcl::PointCloud<RGB_Cloud> point_cloud;
 typedef point_cloud::Ptr cloud_pointer;
+
+int algorithm;
+float threshold;
 
 
 class rotation_estimator
@@ -108,16 +113,17 @@ public:
 };
 
 pcl::visualization::PCLVisualizer::Ptr
-simpleVis (pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr cloud)
+simpleVis (pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr cloud,string name)
 {
   // --------------------------------------------
   // -----Open 3D viewer and add point cloud-----
   // --------------------------------------------
-  pcl::visualization::PCLVisualizer::Ptr viewer (new pcl::visualization::PCLVisualizer ("3D Viewer"));
+  pcl::visualization::PCLVisualizer::Ptr viewer (new pcl::visualization::PCLVisualizer (name));
   viewer->setBackgroundColor (0, 0, 0);
-  viewer->addPointCloud<pcl::PointXYZRGB> (cloud, "sample cloud");
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "sample cloud");
-  //viewer->addCoordinateSystem (1.0, "global");
+  // viewer->addCoordinateSystem (1.0);
+  viewer->addPointCloud<pcl::PointXYZRGB> (cloud, name);
+  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, name);
+  // viewer->addCoordinateSystem (1.0, "global");
   viewer->initCameraParameters ();
   return (viewer);
 }
@@ -226,6 +232,27 @@ Eigen::Quaternionf toQuaternion( double yaw, double pitch, double roll) // yaw (
     q.z() = sy * cp * cr - cy * sp * sr;
     return q;
 }
+float3 toEulerAngle(Eigen::Quaternionf q)
+{
+  float3 euler;
+	// roll (x-axis rotation)
+	double sinr_cosp = +2.0 * (q.w() * q.x() + q.y() * q.z());
+	double cosr_cosp = +1.0 - 2.0 * (q.x() * q.x() + q.y() * q.y());
+	euler.x = atan2(sinr_cosp, cosr_cosp);
+
+	// pitch (y-axis rotation)
+	double sinp = +2.0 * (q.w() * q.y() - q.z() * q.x());
+	if (fabs(sinp) >= 1)
+		euler.y = copysign(M_PI / 2, sinp); // use 90 degrees if out of range
+	else
+		euler.y = asin(sinp);
+
+	// yaw (z-axis rotation)
+	double siny_cosp = +2.0 * (q.w() * q.z() + q.x() * q.y());
+	double cosy_cosp = +1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z());
+	euler.z = atan2(siny_cosp, cosy_cosp);
+  return euler;
+}
 
 void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
 {
@@ -276,39 +303,44 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   auto RGB = frames.get_color_frame();
   std::cout << "rgb Frame collected." << '\n';
 
-  rs2_vector accel_data;
-  rs2_vector accel_angle;
+
+  // Declare object that handles camera pose calculations
+  rotation_estimator algo;
 try{
   // auto frames = pipe.wait_for_frames();
   for (auto f : frames) {
-     if (f.is<motion_frame>()) {
-         motion_frame mf = f.as<motion_frame>();
-         if (mf && mf.get_profile().stream_type() == RS2_STREAM_ACCEL )
-    {
-        // Get gyro measurements
-        accel_data = mf.get_motion_data();
-        // The positive x-axis points to the right.->Y
-        // The positive y-axis points down.->Z
-        // The positive z-axis points forward->X
-        accel_angle.x = 0-atan2(accel_data.y, sqrt(accel_data.z * accel_data.z + accel_data.x * accel_data.x))-(PI/2);
-        accel_angle.y = 0;
-        accel_angle.z = atan2(accel_data.z, accel_data.x)-(PI/2);
-        // accel_angle.x = 180*(PI/180);//roll
-        // accel_angle.y = 0*(PI/180);//pitch
-        // accel_angle.z = 0*(PI/180);//yaw
-printf("%d:accel_data: x:%f,y:%f,z:%f\n", f.get_profile().stream_type(),accel_angle.x*(180/PI),accel_angle.y*(180/PI) ,accel_angle.z*(180/PI));
-        std::cout << "got motionframe" << '\n';
+       if (f.is<motion_frame>()) {
+          // Cast the frame that arrived to motion frame
+          auto motion = f.as<rs2::motion_frame>();
+          // If casting succeeded and the arrived frame is from gyro stream
+          if (motion && motion.get_profile().stream_type() == RS2_STREAM_GYRO && motion.get_profile().format() == RS2_FORMAT_MOTION_XYZ32F)
+          {
+              // Get the timestamp of the current frame
+              double ts = motion.get_timestamp();
+              // Get gyro measures
+              rs2_vector gyro_data = motion.get_motion_data();
+              // Call function that computes the angle of motion based on the retrieved measures
+              //algo.process_gyro(gyro_data, ts);
+          }
+          // If casting succeeded and the arrived frame is from accelerometer stream
+          if (motion && motion.get_profile().stream_type() == RS2_STREAM_ACCEL && motion.get_profile().format() == RS2_FORMAT_MOTION_XYZ32F)
+          {
+              // Get accelerometer measures
+              rs2_vector accel_data = motion.get_motion_data();
+              // Call function that computes the angle of motion based on the retrieved measures
+              algo.process_accel(accel_data);
+          }
+       }else{
+         // std::cout<<"not a poseframe"<<'\n';
+       }
     }
-     }else{
-       // std::cout<<"not a poseframe"<<'\n';
-     }
-  }
-}catch (const rs2::error & e)
+  }catch (const rs2::error & e)
   {
       std::cerr << "RealSense error calling " << e.get_failed_function() << "(" << e.get_failed_args() << "):\n    " << e.what() << std::endl;
 
   }
-
+  printf("accel_data: x:%f,y:%f,z:%f\n",algo.get_theta().x*(180/PI),algo.get_theta().y*(180/PI) ,algo.get_theta().z*(180/PI));
+  std::cout << "got motionframe" << '\n';
 
 
   pc.map_to(RGB);
@@ -317,7 +349,8 @@ printf("%d:accel_data: x:%f,y:%f,z:%f\n", f.get_profile().stream_type(),accel_an
   // Convert generated Point Cloud to PCL Formatting
   cloud_pointer cloud = PCL_Conversion(points, RGB);
   cloud->sensor_origin_ = {0,0,0,0};
-  cloud->sensor_orientation_ = toQuaternion(accel_angle.x,accel_angle.y,accel_angle.z);
+  cloud->sensor_orientation_ = toQuaternion(0-algo.get_theta().x-PI,PI-algo.get_theta().y,algo.get_theta().z+(PI/2));
+  printf("PCL Pose: %f,%f,%f\n",toEulerAngle(cloud->sensor_orientation_).x*(180/PI) ,toEulerAngle(cloud->sensor_orientation_).y*(180/PI) ,toEulerAngle(cloud->sensor_orientation_).z*(180/PI));
   printf("PCL Pose: %f,%f,%f,%f\n",cloud->sensor_orientation_.x() ,cloud->sensor_orientation_.y() ,cloud->sensor_orientation_.z(),cloud->sensor_orientation_.w());
   //========================================
   // Filter PointCloud (PassThrough Method)
@@ -330,6 +363,54 @@ printf("%d:accel_data: x:%f,y:%f,z:%f\n", f.get_profile().stream_type(),accel_an
 
 }
 
+void process_cloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, pcl::PointCloud<pcl::PointXYZRGB>::Ptr final,int algorithm, float threshold)
+{
+  std::vector<int> inliers;
+
+  pcl::RandomSampleConsensus<pcl::PointXYZRGB>* ransac;
+  // created RandomSampleConsensus object and compute the appropriated model
+  pcl::SampleConsensusModelSphere<pcl::PointXYZRGB>::Ptr
+    model_s(new pcl::SampleConsensusModelSphere<pcl::PointXYZRGB> (cloud));
+  pcl::SampleConsensusModelPlane<pcl::PointXYZRGB>::Ptr
+    model_p (new pcl::SampleConsensusModelPlane<pcl::PointXYZRGB> (cloud));
+  pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB>::Ptr
+    model_pp (new pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB> (cloud));
+
+  if(algorithm > 0)
+  {
+    switch (algorithm) {
+      case 1:
+      printf("RANSAC Model P\n" );
+      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+      break;
+      case 2:
+      printf("RANSAC Model S\n" );
+      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_s);
+      break;
+      case 3:
+      // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
+      printf("RANSAC Model Perpendicular Plane\n" );
+      model_pp->setAxis(Eigen::Vector3f (toEulerAngle(cloud->sensor_orientation_).x*(180/PI) ,toEulerAngle(cloud->sensor_orientation_).y*(180/PI) ,toEulerAngle(cloud->sensor_orientation_).z*(180/PI)));
+      model_pp->setEpsAngle (pcl::deg2rad (10.0));
+      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
+      break;
+      default:
+      printf("RANSAC Model P\n" );
+      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+    }
+  }else{
+    printf("RANSAC Model P\n" );
+    ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+  }
+
+  ransac->setDistanceThreshold (threshold);
+  ransac->computeModel();
+  ransac->getInliers(inliers);
+  pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
+  printf("Number of inliers:%d\n", inliers.size());
+  printf("Processed size:%d -> %d\n", cloud->size(),final->size());
+}
+
 int main(int argc, char** argv)
 {
   std::string arg1;
@@ -337,7 +418,17 @@ int main(int argc, char** argv)
   //cloud is input.
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr final (new pcl::PointCloud<pcl::PointXYZRGB>);
-  pcl::RandomSampleConsensus<pcl::PointXYZRGB>* ransac;
+
+  // pcl::visualization::PCLVisualizer::Ptr viewer1;
+  // pcl::visualization::PCLVisualizer::Ptr viewer2;
+  pcl::visualization::PCLVisualizer::Ptr viewer1 (new pcl::visualization::PCLVisualizer ("base"));
+  pcl::visualization::PCLVisualizer::Ptr viewer2 (new pcl::visualization::PCLVisualizer ("final"));
+  viewer1->setBackgroundColor (0, 0, 0);
+  viewer1->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "base");
+  viewer1->initCameraParameters ();
+  viewer2->setBackgroundColor (0, 0, 0);
+  viewer2->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "final");
+  viewer2->initCameraParameters ();
 
   if(pcl::console::find_argument (argc, argv, "-f") >= 0)
   {
@@ -353,76 +444,50 @@ int main(int argc, char** argv)
     printf("GetCloud\n" );
     getCloud(cloud);
   }
-  std::vector<int> inliers;
 
-  // created RandomSampleConsensus object and compute the appropriated model
-  pcl::SampleConsensusModelSphere<pcl::PointXYZRGB>::Ptr
-    model_s(new pcl::SampleConsensusModelSphere<pcl::PointXYZRGB> (cloud));
-  pcl::SampleConsensusModelPlane<pcl::PointXYZRGB>::Ptr
-    model_p (new pcl::SampleConsensusModelPlane<pcl::PointXYZRGB> (cloud));
-  pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB>::Ptr
-    model_pp (new pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB> (cloud));
-    Eigen::Vector3f IMU_Orientation;
-  if(pcl::console::find_argument (argc, argv, "-m") >= 0)
+  if(pcl::console::find_argument (argc, argv, "-t") >= 0)
   {
-    switch (std::stoi(argv[pcl::console::find_argument (argc, argv, "-m")+1])) {
-      case 1:
-      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
-      printf("RANSAC Model P\n" );
-      break;
-      case 2:
-      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_s);
-      printf("RANSAC Model S\n" );
-      break;
-      case 3:
-      // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
-      model_pp->setAxis(Eigen::Vector3f (0.0,0.0, 90.0));
-      model_pp->setEpsAngle (pcl::deg2rad (15.0));
-      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
-      printf("RANSAC Model Perpendicular Plane\n" );
-      break;
-      default:
-      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
-      printf("RANSAC Model P\n" );
-    }
-    if(pcl::console::find_argument (argc, argv, "-t") >= 0)
-    {
-      ransac->setDistanceThreshold (int(pcl::console::find_argument (argc, argv, "-t")+1));
-    }else{
-      ransac->setDistanceThreshold (0.01);
-    }
-    ransac->computeModel();
-    ransac->getInliers(inliers);
-
-
+    threshold = (std::stof(argv[pcl::console::find_argument (argc, argv, "-t")+1]));
   }else{
-
+    threshold = .01;
   }
 
-  //     pcl::SampleConsensusModelSphere<pcl::PointXYZRGB>::Ptr
-  //     model_p (new pcl::SampleConsensusModelSphere<pcl::PointXYZRGB> (cloud));
-  //     pcl::RandomSampleConsensus<pcl::PointXYZRGB> ransac (model_p);
-  //     ransac.setDistanceThreshold (.01);
-  // ransac.computeModel();
-  // ransac.getInliers(inliers);
-      // copies all inliers of the model computed to another PointCloud
-      pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
-  // creates the visualization object and adds either our original cloud or all of the inliers
-  // depending on the command line arguments specified.
-  pcl::visualization::PCLVisualizer::Ptr viewer1;
-  pcl::visualization::PCLVisualizer::Ptr viewer2;
-  if (pcl::console::find_argument (argc, argv, "-m") >= 0){
-    printf("Displaying processed cloud \n" );
-    viewer1 = simpleVis(final);
-    viewer2 = simpleVis(cloud);
+  if (pcl::console::find_argument (argc, argv, "-m") > 0) {
+    /* code */
+    algorithm = std::stoi(argv[pcl::console::find_argument (argc, argv, "-m")+1]);
+    printf("process cloud, algorithm: %d\n", algorithm);
   }else{
-    printf("Displaying raw cloud\n");
-    viewer1 = simpleVis(cloud);
+    algorithm = 0;
   }
+
+
+  process_cloud(cloud,final,algorithm,threshold);
+
+
   while (!viewer1->wasStopped () && !viewer2->wasStopped ())
   {
-    viewer1->spinOnce (100);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Execute lambda asyncronously.
+    auto future = std::async(std::launch::async, [] {
+        std::cout << "press enter to collect another image" << '\n';
+        getchar();
+        return;
+    });
+    printf("displayed size: size:%d -> %d\n", cloud->size(),final->size());
+    viewer1->removePointCloud("base");
+    viewer1->addPointCloud<pcl::PointXYZRGB>(cloud,"base");
+    viewer2->removePointCloud("final");
+    viewer2->addPointCloud<pcl::PointXYZRGB>(final,"final");
+    // Continue execution in main thread.
+    auto status = future.wait_for(std::chrono::milliseconds(0));
+    while(status != std::future_status::ready) {
+        status = future.wait_for(std::chrono::milliseconds(0));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        viewer1->spinOnce (100);
+        viewer2->spinOnce (100);
+    }
+    getCloud(cloud);
+    process_cloud(cloud,final,algorithm,threshold);
+
   }
   return 0;
  }
