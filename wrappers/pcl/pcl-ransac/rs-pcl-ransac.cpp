@@ -390,8 +390,9 @@ void process_cloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, pcl::PointCloud
       case 3:
       // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
       printf("RANSAC Model Perpendicular Plane\n" );
-      model_pp->setAxis(Eigen::Vector3f (toEulerAngle(cloud->sensor_orientation_).x*(180/PI) ,toEulerAngle(cloud->sensor_orientation_).y*(180/PI) ,toEulerAngle(cloud->sensor_orientation_).z*(180/PI)));
-      model_pp->setEpsAngle (pcl::deg2rad (10.0));
+      model_pp->setAxis(Eigen::Vector3f (toEulerAngle(cloud->sensor_orientation_).y*(180/PI),0-toEulerAngle(cloud->sensor_orientation_).x*(180/PI)-90 ,toEulerAngle(cloud->sensor_orientation_).z*(180/PI)));
+      std::cout << "axis: "<<model_pp->getAxis() << '\n';
+      model_pp->setEpsAngle (pcl::deg2rad (5.0));
       ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
       break;
       default:
@@ -477,6 +478,7 @@ int main(int argc, char** argv)
     viewer1->addPointCloud<pcl::PointXYZRGB>(cloud,"base");
     viewer2->removePointCloud("final");
     viewer2->addPointCloud<pcl::PointXYZRGB>(final,"final");
+    viewer2->addCoordinateSystem(.5);
     // Continue execution in main thread.
     auto status = future.wait_for(std::chrono::milliseconds(0));
     while(status != std::future_status::ready) {
