@@ -12,11 +12,14 @@
 #include <pcl/filters/passthrough.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/common/common_headers.h>
+#include <pcl/common/transforms.h>
 #include <pcl/point_types.h>
 #include <pcl/sample_consensus/ransac.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
 #include <pcl/sample_consensus/sac_model_sphere.h>
 #include <pcl/sample_consensus/sac_model_perpendicular_plane.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/visualization/pcl_visualizer.h>
 
 #define PI 3.1415
@@ -31,7 +34,7 @@ typedef point_cloud::Ptr cloud_pointer;
 
 int algorithm;
 float threshold;
-
+float3 IMU_Orientation = {0,0,0};
 
 class rotation_estimator
 {
@@ -40,10 +43,11 @@ class rotation_estimator
     std::mutex theta_mtx;
     /* alpha indicates the part that gyro and accelerometer take in computation of theta; higher alpha gives more weight to gyro, but too high
     values cause drift; lower alpha gives more weight to accelerometer, which is more sensitive to disturbances */
-    float alpha = 0.98;
+    float alpha = 0.01;
     bool first = true;
     // Keeps the arrival time of previous gyro frame
     double last_ts_gyro = 0;
+    float3 last_accel;
 public:
     // Function to calculate the change in angle of motion based on data from gyro
     void process_gyro(rs2_vector gyro_data, double ts)
@@ -79,7 +83,7 @@ public:
         float3 accel_angle;
 
         // Calculate rotation angle from accelerometer data
-        accel_angle.z = atan2(accel_data.y, accel_data.z);
+        accel_angle.z = atan2(accel_data.y, accel_data.z)+pcl::deg2rad(-12.0);
         accel_angle.x = atan2(accel_data.x, sqrt(accel_data.y * accel_data.y + accel_data.z * accel_data.z));
 
         // If it is the first iteration, set initial pose of camera according to accelerometer data (note the different handling for Y axis)
@@ -232,7 +236,7 @@ Eigen::Quaternionf toQuaternion( double yaw, double pitch, double roll) // yaw (
     q.z() = sy * cp * cr - cy * sp * sr;
     return q;
 }
-float3 toEulerAngle(Eigen::Quaternionf q)
+float3 toXYZ(Eigen::Quaternionf q)
 {
   float3 euler;
 	// roll (x-axis rotation)
@@ -253,6 +257,8 @@ float3 toEulerAngle(Eigen::Quaternionf q)
 	euler.z = atan2(siny_cosp, cosy_cosp);
   return euler;
 }
+
+
 
 void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
 {
@@ -292,12 +298,12 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   std::cout << "Enabled Stream" << '\n';
   // Capture a single frame and obtain depth + RGB values from it
   // Wait for frames from the camera to settle
- for (int i = 0; i < 10; i++) {
+ for (int i = 0; i < 50; i++) {
      auto frames = pipe.wait_for_frames(); //Drop several frames for auto-exposure
  }
-
-
  std::cout << "waited for 30 frames" << '\n';
+
+
  auto frames = pipe.wait_for_frames();
   auto depth = frames.get_depth_frame();
   auto RGB = frames.get_color_frame();
@@ -320,7 +326,7 @@ try{
               // Get gyro measures
               rs2_vector gyro_data = motion.get_motion_data();
               // Call function that computes the angle of motion based on the retrieved measures
-              //algo.process_gyro(gyro_data, ts);
+              // algo.process_gyro(gyro_data, ts);
           }
           // If casting succeeded and the arrived frame is from accelerometer stream
           if (motion && motion.get_profile().stream_type() == RS2_STREAM_ACCEL && motion.get_profile().format() == RS2_FORMAT_MOTION_XYZ32F)
@@ -337,7 +343,6 @@ try{
   }catch (const rs2::error & e)
   {
       std::cerr << "RealSense error calling " << e.get_failed_function() << "(" << e.get_failed_args() << "):\n    " << e.what() << std::endl;
-
   }
   printf("accel_data: x:%f,y:%f,z:%f\n",algo.get_theta().x*(180/PI),algo.get_theta().y*(180/PI) ,algo.get_theta().z*(180/PI));
   std::cout << "got motionframe" << '\n';
@@ -349,8 +354,15 @@ try{
   // Convert generated Point Cloud to PCL Formatting
   cloud_pointer cloud = PCL_Conversion(points, RGB);
   cloud->sensor_origin_ = {0,0,0,0};
-  cloud->sensor_orientation_ = toQuaternion(0-algo.get_theta().x-PI,PI-algo.get_theta().y,algo.get_theta().z+(PI/2));
-  printf("PCL Pose: %f,%f,%f\n",toEulerAngle(cloud->sensor_orientation_).x*(180/PI) ,toEulerAngle(cloud->sensor_orientation_).y*(180/PI) ,toEulerAngle(cloud->sensor_orientation_).z*(180/PI));
+  Eigen::Quaternionf rotationq = toQuaternion(0-algo.get_theta().x-PI,PI-algo.get_theta().y,algo.get_theta().z+(PI/2));
+  Eigen::Vector3f translationv = {0,0,0};
+  // Eigen::Affine3f transform(Eigen::Affine3f::Identity());
+  // transform.linear() =(Eigen::Matrix3f) Eigen::AngleAxisf(0-algo.get_theta().x-PI, Eigen::Vector3f::UnitZ())
+                                                  // * Eigen::AngleAxisf(PI-algo.get_theta().y, Eigen::Vector3f::UnitY())
+                                                  // * Eigen::AngleAxisf(algo.get_theta().z+(3*PI/4), Eigen::Vector3f::UnitZ());
+  pcl::transformPointCloud(*cloud, *cloud,translationv, rotationq); //Only rotate target cloud
+  // IMU_Orientation = {0-algo.get_theta().x-PI,PI-algo.get_theta().y,algo.get_theta().z+(PI/2)};
+  printf("PCL Pose: %f,%f,%f\n",toXYZ(cloud->sensor_orientation_).x*(180/PI) ,toXYZ(cloud->sensor_orientation_).y*(180/PI) ,toXYZ(cloud->sensor_orientation_).z*(180/PI));
   printf("PCL Pose: %f,%f,%f,%f\n",cloud->sensor_orientation_.x() ,cloud->sensor_orientation_.y() ,cloud->sensor_orientation_.z(),cloud->sensor_orientation_.w());
   //========================================
   // Filter PointCloud (PassThrough Method)
@@ -366,8 +378,14 @@ try{
 void process_cloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, pcl::PointCloud<pcl::PointXYZRGB>::Ptr final,int algorithm, float threshold)
 {
   std::vector<int> inliers;
-
   pcl::RandomSampleConsensus<pcl::PointXYZRGB>* ransac;
+  pcl::SACSegmentation<pcl::PointXYZRGB> sac;
+  pcl::PointIndices SACinliers;
+  pcl::ModelCoefficients comp_output;
+  pcl::NormalEstimation<pcl::PointXYZRGB, pcl::Normal> normalEstimator;
+  pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGB> ());
+  pcl::PointCloud<pcl::Normal>::Ptr cloud_normals (new pcl::PointCloud<pcl::Normal>);
+
   // created RandomSampleConsensus object and compute the appropriated model
   pcl::SampleConsensusModelSphere<pcl::PointXYZRGB>::Ptr
     model_s(new pcl::SampleConsensusModelSphere<pcl::PointXYZRGB> (cloud));
@@ -375,45 +393,145 @@ void process_cloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, pcl::PointCloud
     model_p (new pcl::SampleConsensusModelPlane<pcl::PointXYZRGB> (cloud));
   pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB>::Ptr
     model_pp (new pcl::SampleConsensusModelPerpendicularPlane<pcl::PointXYZRGB> (cloud));
+  pcl::SACSegmentationFromNormals<pcl::PointXYZRGB, pcl::Normal> model_SacNorm;
+  pcl::ModelCoefficients::Ptr coefficients_plane (new pcl::ModelCoefficients);
+
+
 
   if(algorithm > 0)
   {
     switch (algorithm) {
       case 1:
-      printf("RANSAC Model P\n" );
-      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+        printf("RANSAC Model P\n" );
+        ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+        ransac->setDistanceThreshold (threshold);
+        ransac->computeModel();
+        ransac->getInliers(inliers);
+        pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
+        printf("Number of inliers:%d\n",(int) inliers.size());
+        printf("Processed size:%d -> %d\n",(int) cloud->size(),(int)final->size());
+        return;
       break;
       case 2:
-      printf("RANSAC Model S\n" );
-      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_s);
+        printf("RANSAC Model S\n" );
+        ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_s);
+        ransac->setDistanceThreshold (threshold);
+        ransac->computeModel();
+        ransac->getInliers(inliers);
+        pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
+        printf("Number of inliers:%d\n", (int)inliers.size());
+        printf("Processed size:%d -> %d\n",(int) cloud->size(),(int)final->size());
+        return;
       break;
       case 3:
+        // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
+        printf("RANSAC Model Perpendicular Plane\n" );
+        model_pp->setAxis(Eigen::Vector3f (0.0,1.0,0.0));
+        std::cout << "axis: "<<model_pp->getAxis() << '\n';
+        model_pp->setEpsAngle (pcl::deg2rad (5.0));
+        ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
+        ransac->setDistanceThreshold (threshold);
+        ransac->computeModel();
+        ransac->getInliers(inliers);
+        pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
+        printf("Number of inliers:%d\n", (int)inliers.size());
+        printf("Processed size:%d -> %d\n", (int)cloud->size(),(int)final->size());
+        return;
+      break;
+      case 4:
+        //Set up parameters for our segmentation/ extraction scheme
+        sac.setOptimizeCoefficients(true);
+        sac.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE ); //only want points perpendicular to a given axis
+        sac.setMaxIterations(1000); // this is key (default is 50 and that sucks)
+        sac.setMethodType(pcl::SAC_RANSAC);
+        sac.setDistanceThreshold (0.02); // keep points within 0.05 m of the plane
+
+        //because we want a specific plane (X-Z Plane) (In camera coordinates the ground plane is perpendicular to the y axis)
+        sac.setAxis(Eigen::Vector3f(0.0,1.0,0.0)); //y axis);
+        sac.setEpsAngle( pcl::deg2rad (15.0) ); // plane can be within 30 degrees of X-Z plane
+        sac.setInputCloud(cloud);
+        sac.segment(SACinliers,comp_output);
+        pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, SACinliers, *final);
+        return;
+      break;
+      case 5:
+        // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
+        printf("RANSAC Model Normals Segmentation\n" );
+        // Estimate point normals
+        // normalEstimator.setSearchMethod (tree);
+        // normalEstimator.setInputCloud (cloud);
+        // normalEstimator.setKSearch (50);
+        // normalEstimator.compute (*cloud_normals);
+        //
+        // model_SacNorm.setOptimizeCoefficients (true);
+        // model_SacNorm.setModelType (pcl::SACMODEL_NORMAL_PLANE);
+        // model_SacNorm.setNormalDistanceWeight (0.1);
+        // model_SacNorm.setMethodType (pcl::SAC_RANSAC);
+        // model_SacNorm.setMaxIterations (1000);
+        // model_SacNorm.setDistanceThreshold (0.01);
+        // model_SacNorm.setInputCloud (cloud);
+        // model_SacNorm.setInputNormals (cloud_normals);
+        // // Obtain the plane inliers and coefficients
+        // model_SacNorm.segment (SACinliers, *coefficients_plane);
+        // pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, SACinliers, *final);
+        break;
+      default:
       // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
       printf("RANSAC Model Perpendicular Plane\n" );
-      model_pp->setAxis(Eigen::Vector3f (toEulerAngle(cloud->sensor_orientation_).y*(180/PI),0-toEulerAngle(cloud->sensor_orientation_).x*(180/PI)-90 ,toEulerAngle(cloud->sensor_orientation_).z*(180/PI)));
+      model_pp->setAxis(Eigen::Vector3f (0.0,1.0,0.0));
       std::cout << "axis: "<<model_pp->getAxis() << '\n';
       model_pp->setEpsAngle (pcl::deg2rad (5.0));
       ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
-      break;
-      default:
-      printf("RANSAC Model P\n" );
-      ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+      ransac->setDistanceThreshold (threshold);
+      ransac->computeModel();
+      ransac->getInliers(inliers);
+      pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
+      printf("Number of inliers:%d\n", (int)inliers.size());
+      printf("Processed size:%d -> %d\n", (int)cloud->size(),(int)final->size());
+      return;
     }
   }else{
-    printf("RANSAC Model P\n" );
-    ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_p);
+    // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
+    printf("RANSAC Model Perpendicular Plane\n" );
+    model_pp->setAxis(Eigen::Vector3f (0.0,1.0,0.0));
+    std::cout << "axis: "<<model_pp->getAxis() << '\n';
+    model_pp->setEpsAngle (pcl::deg2rad (5.0));
+    ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
+    ransac->setDistanceThreshold (threshold);
+    ransac->computeModel();
+    ransac->getInliers(inliers);
+    pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
+    printf("Number of inliers:%d\n",(int) inliers.size());
+    printf("Processed size:%d -> %d\n",(int) cloud->size(),(int)final->size());
+    // 
+    // PointCloud<Normal>::Ptr normal (new PointCloud<Normal>);
+    // IntegralImageNormalEstimation<PointXYZ, Normal> ne;
+    // ne.setNormalEstimationMethod (ne.COVARIANCE_MATRIX);
+    // ne.setNormalSmoothingSize (10.0f);
+    // ne.setBorderPolicy (ne.BORDER_POLICY_MIRROR);
+    // ne.setInputCloud (cloud);
+    // ne.compute (*normal);
+    //
+    // OrganizedEdgeFromNormals<PointXYZ, Normal, Label> oed;
+    // //OrganizedEdgeFromRGBNormals<PointXYZ, Normal, Label> oed;
+    // oed.setInputNormals (normal);
+    // oed.setInputCloud (cloud);
+    // oed.setDepthDisconThreshold (th_dd);
+    // oed.setMaxSearchNeighbors (max_search);
+    // oed.setEdgeType (oed.EDGELABEL_NAN_BOUNDARY | oed.EDGELABEL_OCCLUDING | oed.EDGELABEL_OCCLUDED | oed.EDGELABEL_HIGH_CURVATURE | oed.EDGELABEL_RGB_CANNY);
+    // PointCloud<Label> labels;
+    // vector<PointIndices> label_indices;
+    // oed.compute (labels, label_indices);
+
+
+    return;
   }
 
-  ransac->setDistanceThreshold (threshold);
-  ransac->computeModel();
-  ransac->getInliers(inliers);
-  pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
-  printf("Number of inliers:%d\n", inliers.size());
-  printf("Processed size:%d -> %d\n", cloud->size(),final->size());
 }
 
 int main(int argc, char** argv)
 {
+  bool should_save = false;
   std::string arg1;
   // initialize PointClouds
   //cloud is input.
@@ -468,17 +586,24 @@ int main(int argc, char** argv)
   while (!viewer1->wasStopped () && !viewer2->wasStopped ())
   {
     // Execute lambda asyncronously.
-    auto future = std::async(std::launch::async, [] {
+    auto future = std::async(std::launch::async, [&] {
         std::cout << "press enter to collect another image" << '\n';
-        getchar();
+        if (getchar() == 's')
+        {
+          should_save = true;
+        }
         return;
     });
+
     printf("displayed size: size:%d -> %d\n", cloud->size(),final->size());
     viewer1->removePointCloud("base");
     viewer1->addPointCloud<pcl::PointXYZRGB>(cloud,"base");
+    viewer1->addCoordinateSystem(.5);
     viewer2->removePointCloud("final");
     viewer2->addPointCloud<pcl::PointXYZRGB>(final,"final");
     viewer2->addCoordinateSystem(.5);
+        viewer1->spinOnce (100);
+        viewer2->spinOnce (100);
     // Continue execution in main thread.
     auto status = future.wait_for(std::chrono::milliseconds(0));
     while(status != std::future_status::ready) {
@@ -486,6 +611,13 @@ int main(int argc, char** argv)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         viewer1->spinOnce (100);
         viewer2->spinOnce (100);
+    }
+    if (should_save){
+      string cloudFile = "Captured_Frame.pcd";
+      cout << "Generating PCD Point Cloud File... "<<cloudFile << endl;
+      pcl::io::savePCDFileASCII(cloudFile, *cloud); // Input cloud to be saved to .pcd
+      cout << cloudFile << " successfully generated. " << endl;
+      should_save = false;
     }
     getCloud(cloud);
     process_cloud(cloud,final,algorithm,threshold);
