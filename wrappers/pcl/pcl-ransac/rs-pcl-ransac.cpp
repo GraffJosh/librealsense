@@ -19,6 +19,8 @@
 #include <pcl/sample_consensus/sac_model_sphere.h>
 #include <pcl/sample_consensus/sac_model_perpendicular_plane.h>
 #include <pcl/features/normal_3d.h>
+#include <pcl/features/organized_edge_detection.h>
+#include <pcl/features/integral_image_normal.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/visualization/pcl_visualizer.h>
 
@@ -31,6 +33,12 @@ using namespace rs2;
 typedef pcl::PointXYZRGB RGB_Cloud;
 typedef pcl::PointCloud<RGB_Cloud> point_cloud;
 typedef point_cloud::Ptr cloud_pointer;
+
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr occluding_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr occluded_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr nan_boundary_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr high_curvature_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr rgb_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
 
 int algorithm;
 float threshold;
@@ -503,25 +511,39 @@ void process_cloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, pcl::PointCloud
     pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
     printf("Number of inliers:%d\n",(int) inliers.size());
     printf("Processed size:%d -> %d\n",(int) cloud->size(),(int)final->size());
-    // 
-    // PointCloud<Normal>::Ptr normal (new PointCloud<Normal>);
-    // IntegralImageNormalEstimation<PointXYZ, Normal> ne;
-    // ne.setNormalEstimationMethod (ne.COVARIANCE_MATRIX);
-    // ne.setNormalSmoothingSize (10.0f);
-    // ne.setBorderPolicy (ne.BORDER_POLICY_MIRROR);
-    // ne.setInputCloud (cloud);
-    // ne.compute (*normal);
-    //
-    // OrganizedEdgeFromNormals<PointXYZ, Normal, Label> oed;
-    // //OrganizedEdgeFromRGBNormals<PointXYZ, Normal, Label> oed;
-    // oed.setInputNormals (normal);
-    // oed.setInputCloud (cloud);
-    // oed.setDepthDisconThreshold (th_dd);
-    // oed.setMaxSearchNeighbors (max_search);
-    // oed.setEdgeType (oed.EDGELABEL_NAN_BOUNDARY | oed.EDGELABEL_OCCLUDING | oed.EDGELABEL_OCCLUDED | oed.EDGELABEL_HIGH_CURVATURE | oed.EDGELABEL_RGB_CANNY);
-    // PointCloud<Label> labels;
-    // vector<PointIndices> label_indices;
-    // oed.compute (labels, label_indices);
+
+    pcl::PointCloud<pcl::Normal>::Ptr normal (new pcl::PointCloud<pcl::Normal>);
+    pcl::IntegralImageNormalEstimation<pcl::PointXYZRGB, pcl::Normal> ne;
+    ne.setNormalEstimationMethod (ne.COVARIANCE_MATRIX);
+    ne.setNormalSmoothingSize (10.0f);
+    ne.setBorderPolicy (ne.BORDER_POLICY_MIRROR);
+    ne.setInputCloud (final);
+    ne.compute (*normal);
+
+    pcl::OrganizedEdgeFromNormals<pcl::PointXYZRGB, pcl::Normal, pcl::Label> oed;
+    //OrganizedEdgeFromRGBNormals<PointXYZ, Normal, Label> oed;
+    oed.setInputNormals (normal);
+    oed.setInputCloud (final);
+    oed.setDepthDisconThreshold (1);
+    oed.setMaxSearchNeighbors (50);
+    oed.setEdgeType (oed.EDGELABEL_NAN_BOUNDARY | oed.EDGELABEL_OCCLUDING | oed.EDGELABEL_OCCLUDED | oed.EDGELABEL_HIGH_CURVATURE | oed.EDGELABEL_RGB_CANNY);
+    pcl::PointCloud<pcl::Label> labels;
+    vector<pcl::PointIndices> label_indices;
+    oed.compute (labels, label_indices);
+
+
+      // pack r/g/b into rgb
+      // uint8_t r = 255, g = 0, b = 0;    // Example: Red color
+      // uint32_t rgb = ((uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b);
+      // for(auto i : occluded_edges)
+      // {
+      //   i.rgb = *reinterpret_cast<float*>(&rgb);
+      // }
+    copyPointCloud (*final, label_indices[0].indices, *nan_boundary_edges);
+    copyPointCloud (*final, label_indices[1].indices, *occluding_edges);
+    copyPointCloud (*final, label_indices[2].indices, *occluded_edges);
+    copyPointCloud (*final, label_indices[3].indices, *high_curvature_edges);
+    copyPointCloud (*final, label_indices[4].indices, *rgb_edges);
 
 
     return;
@@ -538,16 +560,24 @@ int main(int argc, char** argv)
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr final (new pcl::PointCloud<pcl::PointXYZRGB>);
 
+
+
+
+
   // pcl::visualization::PCLVisualizer::Ptr viewer1;
   // pcl::visualization::PCLVisualizer::Ptr viewer2;
   pcl::visualization::PCLVisualizer::Ptr viewer1 (new pcl::visualization::PCLVisualizer ("base"));
   pcl::visualization::PCLVisualizer::Ptr viewer2 (new pcl::visualization::PCLVisualizer ("final"));
+  pcl::visualization::PCLVisualizer::Ptr viewer3 (new pcl::visualization::PCLVisualizer ("edges"));
   viewer1->setBackgroundColor (0, 0, 0);
   viewer1->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "base");
   viewer1->initCameraParameters ();
   viewer2->setBackgroundColor (0, 0, 0);
   viewer2->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "final");
   viewer2->initCameraParameters ();
+  viewer3->setBackgroundColor (0, 0, 0);
+  viewer3->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "edges");
+  viewer3->initCameraParameters ();
 
   if(pcl::console::find_argument (argc, argv, "-f") >= 0)
   {
@@ -595,15 +625,26 @@ int main(int argc, char** argv)
         return;
     });
 
-    printf("displayed size: size:%d -> %d\n", cloud->size(),final->size());
+    printf("displayed size: size:%d -> %d\n", (int)cloud->size(),(int)final->size());
     viewer1->removePointCloud("base");
     viewer1->addPointCloud<pcl::PointXYZRGB>(cloud,"base");
     viewer1->addCoordinateSystem(.5);
     viewer2->removePointCloud("final");
     viewer2->addPointCloud<pcl::PointXYZRGB>(final,"final");
-    viewer2->addCoordinateSystem(.5);
+    if(nan_boundary_edges->is_dense)
+    viewer3->addPointCloud<pcl::PointXYZRGB>(nan_boundary_edges,"nan_boundary_edges");
+    if(occluding_edges->is_dense)
+    viewer3->addPointCloud<pcl::PointXYZRGB>(occluding_edges,"occluding_edges");
+    if(occluded_edges->is_dense)
+    viewer3->addPointCloud<pcl::PointXYZRGB>(occluded_edges,"occluded_edges");
+    if(high_curvature_edges->empty() == false)
+    viewer3->addPointCloud<pcl::PointXYZRGB>(high_curvature_edges,"high_curvature_edges");
+    if(rgb_edges->is_dense)
+    viewer3->addPointCloud<pcl::PointXYZRGB>(rgb_edges,"rgb_edges");
+
         viewer1->spinOnce (100);
         viewer2->spinOnce (100);
+        viewer3->spinOnce (100);
     // Continue execution in main thread.
     auto status = future.wait_for(std::chrono::milliseconds(0));
     while(status != std::future_status::ready) {
@@ -611,6 +652,7 @@ int main(int argc, char** argv)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         viewer1->spinOnce (100);
         viewer2->spinOnce (100);
+        viewer3->addCoordinateSystem(.5);
     }
     if (should_save){
       string cloudFile = "Captured_Frame.pcd";
