@@ -2,6 +2,7 @@
 #include <chrono>
 #include <thread>
 #include <future>
+#include <string>  // for string
 
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include <Eigen/Geometry>
@@ -10,6 +11,7 @@
 #include <pcl/console/parse.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/passthrough.h>
+#include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/common/common_headers.h>
 #include <pcl/common/transforms.h>
@@ -19,10 +21,12 @@
 #include <pcl/sample_consensus/sac_model_sphere.h>
 #include <pcl/sample_consensus/sac_model_perpendicular_plane.h>
 #include <pcl/features/normal_3d.h>
-#include <pcl/features/organized_edge_detection.h>
 #include <pcl/features/integral_image_normal.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/surface/convex_hull.h>
+#include <pcl/segmentation/extract_clusters.h>
+#include <pcl/kdtree/kdtree.h>
 
 #define PI 3.1415
 
@@ -33,13 +37,7 @@ using namespace rs2;
 typedef pcl::PointXYZRGB RGB_Cloud;
 typedef pcl::PointCloud<RGB_Cloud> point_cloud;
 typedef point_cloud::Ptr cloud_pointer;
-
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr occluding_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr occluded_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr nan_boundary_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr high_curvature_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr rgb_edges (new pcl::PointCloud<pcl::PointXYZRGB>());
-
+std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr> cloud_hulls;// (new std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr>);
 int algorithm;
 float threshold;
 float3 IMU_Orientation = {0,0,0};
@@ -272,10 +270,8 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
 {
   // Declare pointcloud object, for calculating pointclouds and texture mappings
   rs2::pointcloud pc;
-
   // Declare RealSense pipeline, encapsulating the actual device and sensors
   rs2::pipeline pipe;
-
   // Create a configuration for configuring the pipeline with a non default profile
   rs2::config cfg;
 
@@ -306,22 +302,15 @@ void getCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr newCloud)
   std::cout << "Enabled Stream" << '\n';
   // Capture a single frame and obtain depth + RGB values from it
   // Wait for frames from the camera to settle
- for (int i = 0; i < 50; i++) {
-     auto frames = pipe.wait_for_frames(); //Drop several frames for auto-exposure
- }
- std::cout << "waited for 30 frames" << '\n';
+ for (int i = 0; i < 20; i++) {auto frames = pipe.wait_for_frames();}
 
-
- auto frames = pipe.wait_for_frames();
+  auto frames = pipe.wait_for_frames();
   auto depth = frames.get_depth_frame();
   auto RGB = frames.get_color_frame();
-  std::cout << "rgb Frame collected." << '\n';
 
 
   // Declare object that handles camera pose calculations
   rotation_estimator algo;
-try{
-  // auto frames = pipe.wait_for_frames();
   for (auto f : frames) {
        if (f.is<motion_frame>()) {
           // Cast the frame that arrived to motion frame
@@ -344,32 +333,22 @@ try{
               // Call function that computes the angle of motion based on the retrieved measures
               algo.process_accel(accel_data);
           }
-       }else{
-         // std::cout<<"not a poseframe"<<'\n';
        }
     }
-  }catch (const rs2::error & e)
-  {
-      std::cerr << "RealSense error calling " << e.get_failed_function() << "(" << e.get_failed_args() << "):\n    " << e.what() << std::endl;
-  }
   printf("accel_data: x:%f,y:%f,z:%f\n",algo.get_theta().x*(180/PI),algo.get_theta().y*(180/PI) ,algo.get_theta().z*(180/PI));
   std::cout << "got motionframe" << '\n';
 
 
-  pc.map_to(RGB);
   // Generate Point Cloud
+  pc.map_to(RGB);
   auto points = pc.calculate(depth);
-  // Convert generated Point Cloud to PCL Formatting
+  // Convert generated Point Cloud to PCL Formatting. cloud_pointer is a bastardization of pcl::PointXYZRGB
   cloud_pointer cloud = PCL_Conversion(points, RGB);
   cloud->sensor_origin_ = {0,0,0,0};
-  Eigen::Quaternionf rotationq = toQuaternion(0-algo.get_theta().x-PI,PI-algo.get_theta().y,algo.get_theta().z+(PI/2));
+  Eigen::Quaternionf rotationq = toQuaternion(0-algo.get_theta().x-PI,PI-algo.get_theta().y,algo.get_theta().z+(PI/2)); //IMU readings normalized.
   Eigen::Vector3f translationv = {0,0,0};
-  // Eigen::Affine3f transform(Eigen::Affine3f::Identity());
-  // transform.linear() =(Eigen::Matrix3f) Eigen::AngleAxisf(0-algo.get_theta().x-PI, Eigen::Vector3f::UnitZ())
-                                                  // * Eigen::AngleAxisf(PI-algo.get_theta().y, Eigen::Vector3f::UnitY())
-                                                  // * Eigen::AngleAxisf(algo.get_theta().z+(3*PI/4), Eigen::Vector3f::UnitZ());
-  pcl::transformPointCloud(*cloud, *cloud,translationv, rotationq); //Only rotate target cloud
-  // IMU_Orientation = {0-algo.get_theta().x-PI,PI-algo.get_theta().y,algo.get_theta().z+(PI/2)};
+
+  pcl::transformPointCloud(*cloud, *cloud,translationv, rotationq); //Transforms all of the points in the cloud. Rotationq is from the IMU
   printf("PCL Pose: %f,%f,%f\n",toXYZ(cloud->sensor_orientation_).x*(180/PI) ,toXYZ(cloud->sensor_orientation_).y*(180/PI) ,toXYZ(cloud->sensor_orientation_).z*(180/PI));
   printf("PCL Pose: %f,%f,%f,%f\n",cloud->sensor_orientation_.x() ,cloud->sensor_orientation_.y() ,cloud->sensor_orientation_.z(),cloud->sensor_orientation_.w());
   //========================================
@@ -387,7 +366,7 @@ void process_cloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, pcl::PointCloud
 {
   std::vector<int> inliers;
   pcl::RandomSampleConsensus<pcl::PointXYZRGB>* ransac;
-  pcl::SACSegmentation<pcl::PointXYZRGB> sac;
+  pcl::SACSegmentation<pcl::PointXYZRGB> sac;         //SAC segmentation is no longer supported on this platform. Only RANSAC is used.
   pcl::PointIndices SACinliers;
   pcl::ModelCoefficients comp_output;
   pcl::NormalEstimation<pcl::PointXYZRGB, pcl::Normal> normalEstimator;
@@ -448,18 +427,18 @@ void process_cloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, pcl::PointCloud
       break;
       case 4:
         //Set up parameters for our segmentation/ extraction scheme
-        sac.setOptimizeCoefficients(true);
-        sac.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE ); //only want points perpendicular to a given axis
-        sac.setMaxIterations(1000); // this is key (default is 50 and that sucks)
-        sac.setMethodType(pcl::SAC_RANSAC);
-        sac.setDistanceThreshold (0.02); // keep points within 0.05 m of the plane
-
-        //because we want a specific plane (X-Z Plane) (In camera coordinates the ground plane is perpendicular to the y axis)
-        sac.setAxis(Eigen::Vector3f(0.0,1.0,0.0)); //y axis);
-        sac.setEpsAngle( pcl::deg2rad (15.0) ); // plane can be within 30 degrees of X-Z plane
-        sac.setInputCloud(cloud);
-        sac.segment(SACinliers,comp_output);
-        pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, SACinliers, *final);
+        // sac.setOptimizeCoefficients(true);
+        // sac.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE ); //only want points perpendicular to a given axis
+        // sac.setMaxIterations(1000); // this is key (default is 50 and that sucks)
+        // sac.setMethodType(pcl::SAC_RANSAC);
+        // sac.setDistanceThreshold (0.02); // keep points within 0.05 m of the plane
+        //
+        // //because we want a specific plane (X-Z Plane) (In camera coordinates the ground plane is perpendicular to the y axis)
+        // sac.setAxis(Eigen::Vector3f(0.0,1.0,0.0)); //y axis);
+        // sac.setEpsAngle( pcl::deg2rad (15.0) ); // plane can be within 30 degrees of X-Z plane
+        // sac.setInputCloud(cloud);
+        // sac.segment(SACinliers,comp_output);
+        // pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, SACinliers, *final);
         return;
       break;
       case 5:
@@ -500,52 +479,74 @@ void process_cloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, pcl::PointCloud
     }
   }else{
     // IMU_Orientation = cloud->sensor_orientation_.toRotationMatrix().eulerAngles(0,1,2);
+//Ransacs the full point cloud to extract a plane. The point cloud must be previously transformed
+//  to normal gravity wrt. the origin of world.
     printf("RANSAC Model Perpendicular Plane\n" );
-    model_pp->setAxis(Eigen::Vector3f (0.0,1.0,0.0));
+    model_pp->setAxis(Eigen::Vector3f (0.0,1.0,0.0)); //set normal axis of plane (Y axis selects plane in the XY)
     std::cout << "axis: "<<model_pp->getAxis() << '\n';
-    model_pp->setEpsAngle (pcl::deg2rad (5.0));
+    model_pp->setEpsAngle (pcl::deg2rad (5.0));       //maximum deviation from the previous axis the plane is allowed.
     ransac =new pcl::RandomSampleConsensus<pcl::PointXYZRGB>(model_pp);
-    ransac->setDistanceThreshold (threshold);
-    ransac->computeModel();
-    ransac->getInliers(inliers);
-    pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);
-    printf("Number of inliers:%d\n",(int) inliers.size());
-    printf("Processed size:%d -> %d\n",(int) cloud->size(),(int)final->size());
-
-    pcl::PointCloud<pcl::Normal>::Ptr normal (new pcl::PointCloud<pcl::Normal>);
-    pcl::IntegralImageNormalEstimation<pcl::PointXYZRGB, pcl::Normal> ne;
-    ne.setNormalEstimationMethod (ne.COVARIANCE_MATRIX);
-    ne.setNormalSmoothingSize (10.0f);
-    ne.setBorderPolicy (ne.BORDER_POLICY_MIRROR);
-    ne.setInputCloud (final);
-    ne.compute (*normal);
-
-    pcl::OrganizedEdgeFromNormals<pcl::PointXYZRGB, pcl::Normal, pcl::Label> oed;
-    //OrganizedEdgeFromRGBNormals<PointXYZ, Normal, Label> oed;
-    oed.setInputNormals (normal);
-    oed.setInputCloud (final);
-    oed.setDepthDisconThreshold (1);
-    oed.setMaxSearchNeighbors (50);
-    oed.setEdgeType (oed.EDGELABEL_NAN_BOUNDARY | oed.EDGELABEL_OCCLUDING | oed.EDGELABEL_OCCLUDED | oed.EDGELABEL_HIGH_CURVATURE | oed.EDGELABEL_RGB_CANNY);
-    pcl::PointCloud<pcl::Label> labels;
-    vector<pcl::PointIndices> label_indices;
-    oed.compute (labels, label_indices);
+    ransac->setDistanceThreshold (threshold);         //set thickness of plane, aka points outside this thickness are ignored.
+    ransac->computeModel();                           //calculate the plane based on the RANSAC model
+    ransac->getInliers(inliers);                      //returns the cloud that forms the plane we're searching for
+    pcl::copyPointCloud<pcl::PointXYZRGB>(*cloud, inliers, *final);//'final' is passed into this function as a return container
+    printf("Number of inliers:%d\n", (int)inliers.size());
+    printf("Processed size:%d -> %d\n", (int)cloud->size(),(int)final->size());
 
 
-      // pack r/g/b into rgb
-      // uint8_t r = 255, g = 0, b = 0;    // Example: Red color
-      // uint32_t rgb = ((uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b);
-      // for(auto i : occluded_edges)
-      // {
-      //   i.rgb = *reinterpret_cast<float*>(&rgb);
-      // }
-    copyPointCloud (*final, label_indices[0].indices, *nan_boundary_edges);
-    copyPointCloud (*final, label_indices[1].indices, *occluding_edges);
-    copyPointCloud (*final, label_indices[2].indices, *occluded_edges);
-    copyPointCloud (*final, label_indices[3].indices, *high_curvature_edges);
-    copyPointCloud (*final, label_indices[4].indices, *rgb_edges);
 
+      std::cout << "PointCloud before filtering has: " << final->points.size () << " data points." << std::endl; //*
 
+      // Create the filtering object: downsample the dataset using a leaf size of 1cm
+      pcl::VoxelGrid<pcl::PointXYZRGB> vg;
+      pcl::PointCloud<pcl::PointXYZRGB>::Ptr final_filtered (new pcl::PointCloud<pcl::PointXYZRGB>);
+      vg.setInputCloud (final);
+      vg.setLeafSize (0.005f, 0.005f, 0.005f);
+      vg.filter (*final_filtered);
+      std::cout << "PointCloud after filtering has: " << final_filtered->points.size ()  << " data points." << std::endl; //*
+
+    // Creating the KdTree object for the search method of the extraction
+    pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGB>);
+    tree->setInputCloud (final_filtered);
+    std::vector<pcl::PointIndices> cluster_indices;
+    pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
+    ec.setClusterTolerance (0.005); // 1cm
+    ec.setMinClusterSize (500);
+    ec.setMaxClusterSize (25000);
+    ec.setSearchMethod (tree);
+    ec.setInputCloud (final_filtered);
+    ec.extract (cluster_indices);
+
+    std::cout << "clusters extracted" << '\n';
+
+    int j = 0;
+      std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr> cloud_clusters;// (new std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr>);
+    for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); ++it)
+    {
+     pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZRGB>);
+     for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit)
+       cloud_cluster->points.push_back (final_filtered->points[*pit]); //*
+     cloud_cluster->width = cloud_cluster->points.size ();
+     cloud_cluster->height = 1;
+     cloud_cluster->is_dense = true;
+
+     cloud_clusters.push_back(cloud_cluster);
+     std::cout << "cloud_cluster_" << j<< ": "<<cloud_cluster->points.size ()<<'\n';
+     j++;
+    }
+
+std::cout << "clusters: "<< cloud_clusters.size() << '\n';
+
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZRGB>);
+    cloud_hulls.clear();
+    for (auto cluster:cloud_clusters) {
+      //Convex Hull construction. This will form the outlines of objects in the plane.
+      pcl::ConvexHull<pcl::PointXYZRGB> chull;
+      chull.setInputCloud (cluster);
+      chull.reconstruct (*cloud_hull);  //cloud_hull is the points that form the convex hull. stored global. need to update to be a list of clouds.
+      cloud_hulls.push_back(cloud_hull);
+    }
+std::cout << "convex hulls: "<<cloud_hulls.size() << '\n';
     return;
   }
 
@@ -568,16 +569,16 @@ int main(int argc, char** argv)
   // pcl::visualization::PCLVisualizer::Ptr viewer2;
   pcl::visualization::PCLVisualizer::Ptr viewer1 (new pcl::visualization::PCLVisualizer ("base"));
   pcl::visualization::PCLVisualizer::Ptr viewer2 (new pcl::visualization::PCLVisualizer ("final"));
-  pcl::visualization::PCLVisualizer::Ptr viewer3 (new pcl::visualization::PCLVisualizer ("edges"));
+  // pcl::visualization::PCLVisualizer::Ptr viewer3 (new pcl::visualization::PCLVisualizer ("edges"));
   viewer1->setBackgroundColor (0, 0, 0);
   viewer1->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "base");
   viewer1->initCameraParameters ();
   viewer2->setBackgroundColor (0, 0, 0);
   viewer2->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "final");
   viewer2->initCameraParameters ();
-  viewer3->setBackgroundColor (0, 0, 0);
-  viewer3->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "edges");
-  viewer3->initCameraParameters ();
+  // viewer3->setBackgroundColor (0, 0, 0);
+  // viewer3->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "edges");
+  // viewer3->initCameraParameters ();
 
   if(pcl::console::find_argument (argc, argv, "-f") >= 0)
   {
@@ -626,25 +627,27 @@ int main(int argc, char** argv)
     });
 
     printf("displayed size: size:%d -> %d\n", (int)cloud->size(),(int)final->size());
-    viewer1->removePointCloud("base");
+    viewer1->removeAllPointClouds();
     viewer1->addPointCloud<pcl::PointXYZRGB>(cloud,"base");
+    viewer1->removeAllShapes();
     viewer1->addCoordinateSystem(.5);
-    viewer2->removePointCloud("final");
+    viewer2->removeAllPointClouds();
     viewer2->addPointCloud<pcl::PointXYZRGB>(final,"final");
-    if(nan_boundary_edges->is_dense)
-    viewer3->addPointCloud<pcl::PointXYZRGB>(nan_boundary_edges,"nan_boundary_edges");
-    if(occluding_edges->is_dense)
-    viewer3->addPointCloud<pcl::PointXYZRGB>(occluding_edges,"occluding_edges");
-    if(occluded_edges->is_dense)
-    viewer3->addPointCloud<pcl::PointXYZRGB>(occluded_edges,"occluded_edges");
-    if(high_curvature_edges->empty() == false)
-    viewer3->addPointCloud<pcl::PointXYZRGB>(high_curvature_edges,"high_curvature_edges");
-    if(rgb_edges->is_dense)
-    viewer3->addPointCloud<pcl::PointXYZRGB>(rgb_edges,"rgb_edges");
+    viewer2->removeAllShapes();
+    viewer1->spinOnce (100);
+    viewer2->spinOnce (100);
 
-        viewer1->spinOnce (100);
-        viewer2->spinOnce (100);
-        viewer3->spinOnce (100);
+    // viewer3->addPointCloud<pcl::PointXYZRGB>(cloud_hull,"nan_boundary_edges");
+    int p = 0;
+    for(auto polygon:cloud_hulls)
+    {
+      std::cout << "add polygon " << p<<'\n';
+      viewer1->addPolygon<pcl::PointXYZRGB>(polygon,"polygon"+to_string(p));
+      viewer2->addPolygon<pcl::PointXYZRGB>(polygon,"polygon"+to_string(p));
+      p++;
+    }
+
+        // viewer3->spinOnce (100);
     // Continue execution in main thread.
     auto status = future.wait_for(std::chrono::milliseconds(0));
     while(status != std::future_status::ready) {
@@ -652,7 +655,7 @@ int main(int argc, char** argv)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         viewer1->spinOnce (100);
         viewer2->spinOnce (100);
-        viewer3->addCoordinateSystem(.5);
+        // viewer3->addCoordinateSystem(.5);
     }
     if (should_save){
       string cloudFile = "Captured_Frame.pcd";
